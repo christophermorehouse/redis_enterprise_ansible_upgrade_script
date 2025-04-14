@@ -1,0 +1,19 @@
+---
+- name: Upgrade Redis databases
+  hosts: all[0]
+  serial: 1
+  gather_facts: false
+  roles:
+     - upgrade_databases
+  tags:
+     - upgrade_databases
+
+- name: Update CRDB feature sets
+  hosts: all[0]
+  serial: 1
+  gather_facts: false
+  tasks:
+     - name: Update CRDB feature sets task
+       ansible.builtin.include_tasks: "{{ lookup('env', 're_ansbase') }}/playbooks/roles/upgrade_databases/tasks/update-crdb-feature-sets.yaml"
+       tags:
+          - update_crdb_feature_sets

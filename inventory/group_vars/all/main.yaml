@@ -1,0 +1,3 @@
+redislabs_path: /opt/redislabs/bin
+install_dir: /tmp/re_install 
+pause_seconds: 15

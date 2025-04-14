@@ -1,0 +1,123 @@
+# Print the current node's IP address
+- name: "Debug the value of the current ip_int_node"
+  ansible.builtin.debug:
+    msg: "current node is: {{ ip_int_node}} and uid is: {{ uid }}"
+    verbosity: 0
+
+# Download and extract the Redis Enterprise installation file to the current node.
+# This is done first so we can rerun the ansible script if the download fails.
+- name: Delete reinstall directory {{ install_dir }}
+  ansible.builtin.file:
+    state: absent
+    path: "{{ install_dir }}"
+  become: true
+
+- name: Create reinstall directory {{ install_dir }}
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    recurse: true
+    state: directory
+  become: true
+
+- name: "Downloading and Extracting install file"
+  ansible.builtin.unarchive:
+    src: "{{ re_url }}"
+    dest: "{{ install_dir }}"
+    remote_src: true
+    creates: "{{ install_dir }}/install.sh"
+  become: true
+
+- name: "Find the inventory group that contains all the nodes in the current cluster"
+  set_fact:
+    cluster_group_name: "{{ group_names | first }}"
+  when: group_names | length > 0
+
+- name: "Debug the inventory group name"
+  ansible.builtin.debug:
+    msg: "Current cluster group: {{ cluster_group_name }}"
+    verbosity: 0
+  when: cluster_group_name is defined
+
+# Get another node's IP address from the inventory group to use during the last task of joining the current node back to the cluster
+- name: "Grab the first ansible_host != to the current node's ip_int_node"
+  set_fact:
+    other_node_ip_from_cluster: "{{ groups[cluster_group_name] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'ansible_host') | first }}"
+
+# Get the hostname of the other node using its IP address. We will use this to delegate the removal of the corrupted node from the cluster
+- name: "Get hostname for the other node using its IP"
+  set_fact:
+    other_node_hostname: "{{ hostvars | dict2items | selectattr('value.ansible_host', 'equalto', other_node_ip_from_cluster) | map(attribute='key') | first }}"
+
+# Validate that the hostname of the other node is the same as the one we got from the IP address
+- name: "Debug the mapping between IP and hostname"
+  ansible.builtin.debug:
+    msg: 
+      - "Other node IP address: {{ other_node_ip_from_cluster }}"
+      - "Other node hostname: {{ other_node_hostname }}"
+      - "Verification: {{ hostvars[other_node_hostname].ansible_host == other_node_ip_from_cluster }}"
+    verbosity: 0
+
+# Delegate to the other node and remove the current corrupted node from the cluster
+- name: Remove corrupted node id from cluster
+  ansible.builtin.command: "/opt/redislabs/bin/rladmin node {{uid}} remove"
+  delegate_to: "{{ other_node_hostname }}"
+  become: true
+  register: remote_status
+
+- name: "Check the OS distribution"
+  ansible.builtin.set_fact:
+    is_debian: "{{ ansible_facts['os_family'] | lower == 'debian' }}"
+    is_redhat: "{{ ansible_facts['os_family'] | lower == 'redhat' }}"
+
+- name: "Debug OS information"
+  ansible.builtin.debug:
+    msg: "OS Family: {{ ansible_facts['os_family'] }}, Distribution: {{ ansible_facts['distribution'] }}"
+    verbosity: 0
+
+# Start manually purging the current node's Redis Enterprise installation
+# In a corrupted install scenario, the rl_uninstall.sh script may not work as well as rerunning install.sh, so we have to manually remove the Redis Enterprise installation
+- name: "Stop Redis Enterprise supervisor service"
+  ansible.builtin.systemd:
+    name: rlec_supervisor
+    state: stopped
+  become: true
+
+- name: "Purge Redis Enterprise package on Debian-based systems"
+  ansible.builtin.command:
+    cmd: "dpkg --purge --force-all redislabs"
+  become: true
+  when: is_debian | bool
+
+- name: "Purge Redis Enterprise package on RedHat-based systems"
+  ansible.builtin.command:
+    cmd: "rpm -e --nodeps redislabs"
+  become: true
+  when: is_redhat | bool
+
+- name: Remove /opt/redislabs directory
+  ansible.builtin.file:
+    state: absent
+    path: /opt/redislabs
+  become: true
+
+- name: Remove /etc/opt/redislabs directory
+  ansible.builtin.file:
+    state: absent
+    path: /etc/opt/redislabs
+  become: true
+
+# Reinstall Redis Enterprise on the current node
+- name: Running install.sh in {{ install_dir }}
+  ansible.builtin.command: "{{ install_dir }}/install.sh -y"
+  args:
+    chdir: "{{ install_dir }}"
+  become: true
+
+- name: "Install Complete. Pausing for {{ pause_seconds }} seconds"
+  ansible.builtin.pause:
+    seconds: "{{ pause_seconds }}"
+
+# Use the other node's IP address to join the current node back to the cluster
+- name: "Join node to Redis Enterprise"
+  ansible.builtin.command: "/opt/redislabs/bin/rladmin cluster join nodes {{ other_node_ip_from_cluster }} username {{ username }} password {{ password }} addr {{ ip_int_node }} external_addr {{ ip_int_node }} replace_node {{uid}}"
+  become: true

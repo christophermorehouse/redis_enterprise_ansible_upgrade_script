@@ -1,0 +1,27 @@
+---
+- name: Upgrade Redis master
+  hosts: all
+  serial: 1
+  become: true
+  vars:
+    upgrade_master: true
+  roles:
+    - upgrade
+
+- name: Upgrade remaining Redis nodes
+  hosts: all
+  serial: 1
+  become: true
+  vars:
+    upgrade_master: false
+  roles:
+    - upgrade
+
+- name: "Reinstall Redis Enterprise on corrupted nodes"
+  hosts: all
+  serial: 1
+  become: true
+  tasks:
+    - name: "Reinstall RE tasks"
+      ansible.builtin.include_tasks: "{{ lookup('env', 're_ansbase') }}/playbooks/roles/upgrade/tasks/reinstall-re-on-corrupted-node.yaml"
+      when: reinstall_re | bool

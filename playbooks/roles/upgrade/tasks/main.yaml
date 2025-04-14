@@ -1,0 +1,168 @@
+- name: "Setting internal IP to specified internal IP"
+  ansible.builtin.set_fact:
+    ip_int_node: "{{ internal_ip }}"
+  when: internal_ip is defined
+
+- name: Setting internal IP to {{ inventory_hostname }}
+  ansible.builtin.set_fact:
+    ip_int_node: "{{ inventory_hostname }}"
+    internal_ip: "{{ inventory_hostname }}"
+  when: internal_ip is not defined
+
+- name: "Set default reinstall_re to false"
+  ansible.builtin.set_fact:
+    reinstall_re: false
+
+# Check to make sure node status is ok and not in a corrupted state
+- name: "Check node health"
+  ansible.builtin.shell: "/opt/redislabs/bin/rladmin status issues_only | grep {{ip_int_node}}"
+  register: node_health
+  failed_when: false
+
+# If node is in a corrupted "REPLICATION LINK DOWN" state, set reinstall_re variable to true
+- name: "Set force_update if REPLICATION LINK DOWN is found"
+  ansible.builtin.set_fact:
+    reinstall_re: true
+  when: "'ERROR: REPLICATION LINK DOWN' in node_health.stdout"
+
+# Print the value of reinstall_re
+- name: "Debug force_update"
+  ansible.builtin.debug:
+    msg: "reinstall_re is set to: {{ reinstall_re }}"
+    verbosity: 0
+
+# If there are any other type of issues, fail the playbook and exit the script.
+- name: "Exit script if any other issue is found"
+  when:
+    - node_health.stdout != ""
+    - "'ERROR: REPLICATION LINK DOWN' not in node_health.stdout"
+  ansible.builtin.fail:
+    msg: "Node health check failed with unexpected issue: {{ node_health.stdout }}"
+
+# Verify if this version is new
+- name: "Getting list of nodes {{ ip_int_node }}"
+  ansible.builtin.uri:
+    url: "https://{{ ip_int_node }}:9443/v1/bootstrap"
+    user: "{{ username }}"
+    password: "{{ password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    return_content: true
+    follow_redirects: all
+  register: bootstrap_result
+  check_mode: false
+
+- name: "Getting the version of redis enterprise on this node {{ ip_int_node }}"
+  ansible.builtin.set_fact:
+    software_version: "{{ bootstrap_result.json.local_node_info.software_version }}"
+
+- name: "Debug system software version"
+  ansible.builtin.debug:
+    msg: System {{ ip_int_node }} software_version={{ software_version }} going to upgrade to {{ re_url }}
+    verbosity: 0
+
+# Compare the version of the software on this node with the version found in the URL of the software to be downloaded
+# If the versions match, set skip_upgrade to true
+- name: Skip the upgrade on this node
+  ansible.builtin.set_fact:
+    skip_upgrade: "{{ re_url is search(software_version) }}"
+  when: software_version is defined
+
+# Verify if this node is master
+- name: "Find out if we're the master"
+  ansible.builtin.uri:
+    url: "https://{{ ip_int_node }}:9443/v1/access"
+    user: "{{ username }}"
+    password: "{{ password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    return_content: true
+    follow_redirects: all
+  register: master_access
+  check_mode: false
+
+- name: "I am the master node?"
+  ansible.builtin.set_fact:
+    i_am_the_master: "{{ master_access.json.master_node_addr == internal_ip }}"
+
+- name: "Debug system software version"
+  ansible.builtin.debug:
+    msg: I am the master {{ i_am_the_master }}
+    verbosity: 0
+
+- name: "Upgrade the master only?"
+  ansible.builtin.set_fact:
+    skip_upgrade: "{{ skip_upgrade or (upgrade_master and not i_am_the_master) }}"
+  when: i_am_the_master is defined
+
+- name: "Getting list of nodes {{ ip_int_node }}"
+  ansible.builtin.uri:
+    url: "https://{{ ip_int_node }}:9443/v1/nodes"
+    user: "{{ username }}"
+    password: "{{ password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    return_content: true
+    follow_redirects: all
+  register: result
+  check_mode: false
+
+- name: "Getting my node id for {{ ip_int_node }}"
+  ansible.builtin.set_fact:
+    uid: "{{ result.json | json_query(query1) }}"
+    accept_servers: "{{ result.json | json_query(query2) }}"
+  vars:
+    query1: "[?addr =='{{ internal_ip }}'].uid | [0]"
+    query2: "[?addr =='{{ internal_ip }}'].accept_servers | [0]"
+  when: result.json is defined
+
+- name: "Debug node information"
+  ansible.builtin.debug:
+    msg: System {{ internal_ip }} uid={{ uid }} accept_servers={{ accept_servers }}
+    verbosity: 0
+
+- name: Exit if we can't parse the uid for the node
+  ansible.builtin.fail:
+    msg: "UID is not a valid number"
+  when: (uid | int <= 0)
+
+##### Only upgrade the current node if both skip_upgrade and reinstall_re is false
+
+- name: Delete directory {{ install_dir }}
+  when: not skip_upgrade and not reinstall_re
+  ansible.builtin.file:
+    state: absent
+    path: "{{ install_dir }}"
+  become: true
+
+- name: Create directory {{ install_dir }}
+  when: not skip_upgrade and not reinstall_re
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    recurse: true
+    state: directory
+  become: true
+
+- name: "Downloading and Extracting"
+  when: not skip_upgrade and not reinstall_re
+  ansible.builtin.unarchive:
+    src: "{{ re_url }}"
+    dest: "{{ install_dir }}"
+    remote_src: true
+    creates: "{{ install_dir }}/install.sh"
+  become: true
+
+- name: Running install.sh in {{ install_dir }}
+  when: not skip_upgrade and not reinstall_re
+  ansible.builtin.command: "{{ install_dir }}/install.sh -y"
+  args:
+    chdir: "{{ install_dir }}"
+  become: true
+
+- name: "Pause for seconds"
+  ansible.builtin.pause:
+    seconds: "{{ pause_seconds }}"
+  when: not skip_upgrade and not reinstall_re

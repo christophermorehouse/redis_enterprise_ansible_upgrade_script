@@ -1,0 +1,12 @@
+---
+  aa_primary_cluster:
+    hosts:
+      aa_primary_cluster_n1:
+        ansible_host: "{{ internal_ip }}"
+        ansible_become_pass: "{{ ansible_become_password }}"
+      aa_primary_cluster_n2:
+        ansible_host: "{{ internal_ip }}"
+        ansible_become_pass: "{{ ansible_become_password }}"
+      aa_primary_cluster_n3:
+        ansible_host: "{{ internal_ip }}"
+        ansible_become_pass: "{{ ansible_become_password }}"

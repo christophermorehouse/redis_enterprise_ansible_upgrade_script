@@ -1,0 +1,29 @@
+- name: Get list of CRDB and BDB databases
+  ansible.builtin.uri:
+    url: "https://{{ internal_ip }}:9443/v1/bdbs?fields=crdt_guid,name"
+    method: GET
+    user: "{{ username }}"
+    password: "{{ password }}"
+    force_basic_auth: true
+    return_content: true
+    validate_certs: false
+    follow_redirects: all
+  ignore_errors: false
+  register: result
+  tags:
+    - update_crdb_feature_sets
+
+- name: "Pause for seconds"
+  ansible.builtin.pause:
+    seconds: "{{ pause_seconds | default(5) }}"
+  tags:
+    - update_crdb_feature_sets
+
+- name: "Upgrading CRDB feature sets"
+  ansible.builtin.command: "/opt/redislabs/bin/crdb-cli crdb update --crdb-guid {{ item.crdt_guid }} --featureset-version yes"
+  become: true
+  with_items: "{{ result.json | json_query(server_query) }}"
+  vars:
+    server_query: "[?crdt_guid!='']"
+  tags:
+    - update_crdb_feature_sets
